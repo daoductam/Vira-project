@@ -1,0 +1,73 @@
+name: Deploy Vira to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      # 1. Build Backend
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build Backend JAR
+        working-directory: ./backend
+        run: |
+          chmod +x mvnw
+          ./mvnw clean package -DskipTests
+
+      # 2. Build Frontend
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Build Frontend Assets
+        run: |
+          npm ci
+          VITE_API_URL="https://api-vira.daoductam.dpdns.org/api/v1" npm run build
+
+      # 3. Prepare Deploy Artifacts
+      - name: Package Artifacts
+        run: |
+          tar -czf dist.tar.gz dist
+          tar -czf backend-deploy.tar.gz backend/Dockerfile backend/target/vira-api-0.1.0.jar
+
+      # 4. Deploy to AWS EC2 via SSH
+      - name: Deploy to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "dist.tar.gz,backend-deploy.tar.gz"
+          target: "/home/ubuntu/vira"
+
+      - name: Reload Docker Containers on EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ubuntu/vira
+            tar -xzf dist.tar.gz
+            tar -xzf backend-deploy.tar.gz
+            cp backend/Dockerfile .
+            mkdir -p target
+            cp backend/target/vira-api-0.1.0.jar target/
+            docker build -t vira-api:latest .
+            docker compose -f docker-compose.prod.yml up -d
+            docker image prune -f
